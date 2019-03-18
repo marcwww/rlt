@@ -5,6 +5,10 @@ from torch import nn
 from torch.nn import functional
 import torchtext
 import random
+import time
+import numpy as np
+import logging
+LOGGER = logging.getLogger(__name__)
 
 def convert_to_one_hot(indices, num_classes):
     """
@@ -168,6 +172,22 @@ def batch(data, batch_size, batch_size_fn=None):
             minibatch, size_so_far = minibatch[-1:], batch_size_fn(ex, 1, 0)
     if minibatch:
         yield minibatch
+
+def init_seed(seed=None):
+    """Seed the RNGs for predicatability/reproduction purposes."""
+    def get_ms():
+        """Returns the current time in miliseconds."""
+        return time.time() * 1000
+
+    if seed is None:
+        seed = int(get_ms() // 1000)
+
+    LOGGER.info("Using seed=%d", seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    random.seed(seed)
+    if torch.cuda.is_available():
+        torch.backends.cudnn.deterministic = True
 
 def pool(data, batch_size, key, batch_size_fn=lambda new, count, sofar: count,
          random_shuffler=None, shuffle=False, sort_within_batch=False):

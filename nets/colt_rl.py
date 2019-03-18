@@ -136,8 +136,7 @@ class CoopLatentTreeRL(nn.Module):
                  + left_mask_expand * old_c_left
                  + right_mask_expand * old_c_right)
         # selected_h = (select_mask_expand * new_h).sum(1)
-        return new_h, new_c, left_mask_expand, right_mask_expand,\
-               indices, log_prob, comp_dist.entropy()
+        return new_h, new_c, indices, log_prob, comp_dist.entropy()
 
     def forward(self, input, length, self_critic=False, tree=None):
         max_depth = input.size(1)
@@ -146,63 +145,32 @@ class CoopLatentTreeRL(nn.Module):
         indices_select = []
         state = self.word_linear(input)
         state = state.chunk(chunks=2, dim=2)
-        h, c = state
-        l = (h[:, :-1, :], c[:, :-1, :])
-        r = (h[:, 1:, :], c[:, 1:, :])
-        state_comp = self.treelstm_layer(l=l, r=r)
 
         log_prob_sum = 0
         entropy_sum = 0
         for i in range(max_depth - 1):
-
+            h, c = state
+            l = (h[:, :-1, :], c[:, :-1, :])
+            r = (h[:, 1:, :], c[:, 1:, :])
+            new_state = self.treelstm_layer(l=l, r=r)
             if i < max_depth - 2:
                 # We don't need to greedily select the composition in the
                 # last iteration, since it has only one option left.
-                new_h, new_c, left_mask, right_mask, indices, log_prob, entropy = \
+                new_h, new_c, indices, log_prob, entropy = \
                     self.select_composition(
                         old_state=state,
-                        new_state=state_comp,
+                        new_state=new_state,
                         mask=length_mask[:, i + 1:],
                         indices_given=tree[i] if tree else None)  # select_mask: (bsz, cur_len), i.e. select_dist over
                 #  constituents at each time step
-                state_new = (new_h, new_c)
+                new_state = (new_h, new_c)
                 indices_select.append(indices)
                 log_prob_sum += log_prob
                 entropy_sum += entropy
 
-                done_mask = length_mask[:, i + 1]
-                state = self.update_state(old_state=state, new_state=state_new,
-                                          done_mask=done_mask)  # this step is to retain the finised final hiddens
-                # TODO: update state_comp with treelstm_layer and state
-                h, c = state
-                bsz, seq_len, hdim = h.shape
-                indices_l = torch.stack([indices - 1, indices], dim=1).clamp_(min=0, max=seq_len-1).\
-                    unsqueeze(-1).expand(bsz, 2, hdim)
-                indices_r = torch.stack([indices, indices + 1], dim=1).clamp_(min=0, max=seq_len-1).\
-                    unsqueeze(-1).expand(bsz, 2, hdim)
-                l = (h.gather(dim=1, index=indices_l), c.gather(dim=1, index=indices_l))
-                r = (h.gather(dim=1, index=indices_r), c.gather(dim=1, index=indices_r))
-                state_comp_singtwo = self.treelstm_layer(l=l, r=r) # state_comp_singtwo: (bsz, 2, hdim)
-                h_comp, c_comp = state_comp
-                l_comp = (h_comp[:, :-1] * left_mask[:, :-1], c_comp[:, :-1] * left_mask[:, :-1])
-                r_comp = (h_comp[:, 1:] * right_mask[:, 1:], c_comp[:, 1:] * right_mask[:, 1:])
-                state_comp = (l_comp[0] + r_comp[0], l_comp[1] + r_comp[1])
-                mask_le = indices.le(seq_len - 2).unsqueeze(-1)
-                mask_ge = (indices - 1).ge(0).unsqueeze(-1)
-                state_comp[0][range(bsz), torch.clamp(indices, min=0, max=seq_len-2)] += state_comp_singtwo[0][:, 1].masked_fill_(mask_le, 0)
-                state_comp[1][range(bsz), torch.clamp(indices, min=0, max=seq_len-2)] += state_comp_singtwo[1][:, 1].masked_fill_(mask_le, 0)
-
-                state_comp[0][range(bsz), torch.clamp(indices - 1, min=0, max=seq_len-2)] += state_comp_singtwo[0][:, 0].masked_fill_(mask_ge, 0)
-                state_comp[1][range(bsz), torch.clamp(indices - 1, min=0, max=seq_len-2)] += state_comp_singtwo[1][:, 0].masked_fill_(mask_ge, 0)
-
-            else:
-                done_mask = length_mask[:, i + 1]
-                state = self.update_state(old_state=state, new_state=state_comp,
-                                          done_mask=done_mask)  # this step is to retain the finised final hiddens
-                h, c = state
-                l = (h[:, :-1], c[:, :-1])
-                r = (h[:, 1:], c[:, 1:])
-                state_comp = self.treelstm_layer(l=l, r=r)
+            done_mask = length_mask[:, i + 1]
+            state = self.update_state(old_state=state, new_state=new_state,
+                                      done_mask=done_mask)  # this step is to retain the finised final hiddens
 
         h, c = state  # h/c: (bsz, 1, hdim)
 

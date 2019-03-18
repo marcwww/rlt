@@ -68,8 +68,8 @@ def build_iters(args):
     fvalid = 'data/test_d20s.tsv'
     # ftest = 'data/test_d20s.tsv'
 
-    # examples_train, len_ave = load_examples(ftrain, seq_len_max=100)
-    examples_train, len_ave = load_examples(ftrain)
+    examples_train, len_ave = load_examples(ftrain, seq_len_max=100)
+    # examples_train, len_ave = load_examples(ftrain)
     examples_valid, _ = load_examples(fvalid)
     train = Dataset(examples_train, fields=[('expr', EXPR),
                                             ('val', VAL)])
@@ -80,6 +80,7 @@ def build_iters(args):
 
     def batch_size_fn(new_example, current_count, ebsz):
         return ebsz + (len(new_example.expr) / len_ave) ** 0.3
+        # return ebsz + (len(new_example.expr) / len_ave) ** 1
 
     device = torch.device(args.gpu if args.gpu != -1 else 'cpu')
     train_iter = basic.BucketIterator(train,
@@ -249,6 +250,7 @@ def main():
     parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
     parser.add_argument('-edim', type=int, default=128)
     parser.add_argument('-hdim', type=int, default=128)
+    # parser.add_argument('-bsz', type=int, default=32)
     parser.add_argument('-bsz', type=int, default=128)
     parser.add_argument('-l2reg', type=float, default=0.0)
     parser.add_argument('-gpu', type=int, default=-1)
@@ -256,8 +258,11 @@ def main():
     parser.add_argument('-nepoches', type=int, default=1000)
     parser.add_argument('-parser_batch', type=int, default=15)
     parser.add_argument('--halve-lr-every', type=int, default=2)
+    parser.add_argument('-seed', type=int, default=1000)
 
     args = parser.parse_args()
+    basic.init_seed(args.seed)
+
     train(args)
 
 
