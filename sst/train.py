@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import tqdm
 
 from tensorboardX import SummaryWriter
 
@@ -101,7 +102,7 @@ def train(args):
     validate_every = num_train_batches // 20
     best_vaild_accuacy = 0
     iter_count = 0
-    for batch_iter, train_batch in enumerate(train_loader):
+    for batch_iter, train_batch in enumerate(tqdm.tqdm(train_loader)):
         train_loss, train_accuracy = run_iter(
             batch=train_batch, is_training=True)
         iter_count += 1
@@ -147,26 +148,26 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
-    parser.add_argument('--word-dim', type=int, default=128)
-    parser.add_argument('--hidden-dim', type=int, default=128)
-    parser.add_argument('--clf-hidden-dim', type=int, default=128)
+    parser.add_argument('--word-dim', type=int, default=300)
+    parser.add_argument('--hidden-dim', type=int, default=300)
+    parser.add_argument('--clf-hidden-dim', type=int, default=1024)
     parser.add_argument('--clf-num-layers', type=int, default=1)
-    parser.add_argument('--leaf-rnn', default=False, action='store_true')
-    parser.add_argument('--bidirectional', default=False, action='store_true')
+    parser.add_argument('--leaf-rnn', default=True, action='store_true')
+    parser.add_argument('--bidirectional', default=True, action='store_true')
     parser.add_argument('--intra-attention', default=False, action='store_true')
     parser.add_argument('--batchnorm', default=False, action='store_true')
-    parser.add_argument('--dropout', default=0.0, type=float)
+    parser.add_argument('--dropout', default=0.5, type=float)
     parser.add_argument('--l2reg', default=0.0, type=float)
-    parser.add_argument('--pretrained', default=None)
+    parser.add_argument('--pretrained', default='glove.840B.300d')
     parser.add_argument('--fix-word-embedding', default=False,
                         action='store_true')
     parser.add_argument('--device', default='cpu', type=str)
-    parser.add_argument('--batch-size', type=int, default=32)
+    parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--max-epoch', type=int, default=1000)
     parser.add_argument('--save-dir', type=str, default='.')
     parser.add_argument('--omit-prob', default=0.0, type=float)
-    parser.add_argument('--optimizer', default='adam')
-    parser.add_argument('--fine-grained', default=False, action='store_true')
+    parser.add_argument('--optimizer', default='adadelta')
+    parser.add_argument('--fine-grained', default=True, action='store_true')
     parser.add_argument('--halve-lr-every', default=2, type=int)
     parser.add_argument('--lower', default=False, action='store_true')
     args = parser.parse_args()

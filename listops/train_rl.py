@@ -104,6 +104,9 @@ def build_iters(args):
     return train_iter, valid_iter, EXPR, VAL
 
 
+def normalize_reward(r):
+    return r.div(r.std())
+
 def run_iter(model, model_old, criterion, optimizer,
              params, batch, is_training, train_parser):
     model.train(is_training)
@@ -113,20 +116,21 @@ def run_iter(model, model_old, criterion, optimizer,
         model.train_parser()
         with torch.no_grad():
             clf_logits, log_prob_sum_old, tree, _ = model_old(inp=expr, length=length)
-            clf_logits_baseline, _, _, _ = model(inp=expr, length=length, self_critic=True)
+            clf_logits_baseline, _, _, _ = model_old(inp=expr, length=length, self_critic=True)
         _, log_prob_sum, _, entropy = model(inp=expr, length=length, tree=tree)
+        # reward = normalize_reward((-F.cross_entropy(clf_logits, val, reduce=False)).exp())
+        reward = normalize_reward((-F.cross_entropy(clf_logits, val, reduce=False)))
+        # reward_baseline = normalize_reward((-F.cross_entropy(clf_logits_baseline, val, reduce=False)).exp())
+        reward_baseline = normalize_reward((-F.cross_entropy(clf_logits_baseline, val, reduce=False)))
+        advan = reward - reward_baseline
+        # advan = reward
 
-        A = F.cross_entropy(clf_logits, val, reduce=False) - \
-            F.cross_entropy(clf_logits_baseline, val, reduce=False)
-        # A = F.cross_entropy(clf_logits, val, reduce=False)
-        # A_normalized = (A - A.mean()).div(A.std())
-        A_normalized = A.div(A.std())
-        # A_normalized = A
         r = (log_prob_sum - log_prob_sum_old).exp()
         r_clipped = torch.clamp(r, min=1 - 0.25, max=1 + 0.25)
-        surrogate_loss = (r * A_normalized).mean()
-        surrogate_loss_clipped = (r_clipped * A_normalized).mean()
-        loss = max(surrogate_loss, surrogate_loss_clipped) - 1e-4 * entropy.mean()
+        ppo_loss = -torch.min(r * advan, r_clipped * advan).mean()
+        loss = ppo_loss - 1e-2 * entropy.mean()
+        # print(f'PPO loss{ppo_loss:.4f}')
+        # print(f'Entropy loss {entropy.mean():.4f}')
     else:
         model.train_composition()
         clf_logits, _, _, _ = model(inp=expr, length=length, self_critic=True)
@@ -197,6 +201,7 @@ def train(args):
                                      is_training=True,
                                      train_parser=False)
                 loss_comp.append(loss.item())
+                model_old.load_state_dict(model.state_dict())
             else:
                 # train parser
                 loss, acc = run_iter(model,
@@ -208,8 +213,6 @@ def train(args):
                                      is_training=True,
                                      train_parser=True)
                 loss_parser.append(loss.item())
-            if i % (10 + 1) == 0:
-                model_old.load_state_dict(model.state_dict())
 
         print(f'Epoch={epoch} '
               f'Loss(parser)={np.mean(loss_parser):.4f} '

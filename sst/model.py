@@ -83,7 +83,7 @@ class SSTModel(nn.Module):
                                       gumbel_temperature=1,
                                       bidirectional=bidirectional)
         self.classifier = SSTClassifier(
-            num_classes=num_classes, input_dim=hidden_dim,
+            num_classes=num_classes, input_dim=hidden_dim if not bidirectional else hidden_dim * 2,
             hidden_dim=clf_hidden_dim, num_layers=clf_num_layers,
             use_batchnorm=use_batchnorm, dropout_prob=dropout_prob)
         self.reset_parameters()
