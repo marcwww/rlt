@@ -15,6 +15,7 @@ import torchtext
 from torchtext.data import Dataset
 import numpy as np
 import re
+import random
 
 from listops.macros import *
 from nets import basic
@@ -103,38 +104,63 @@ def build_iters(args):
 
     return train_iter, valid_iter, EXPR, VAL
 
+class ReplayMem(object):
+
+    def __init__(self, nbatch):
+        self.mem = [None for _ in range(nbatch)]
+        self.ptr = 0
+
+    def sample(self):
+        return random.choice(self.mem)
+
+    def push(self, batch):
+        self.mem[self.ptr % len(self.mem)] = batch
+        self.ptr += 1
+
+def load_mem(mem: ReplayMem, model, data_iter):
+    with torch.no_grad():
+        for i, batch in enumerate(tqdm.tqdm(data_iter)):
+            expr, length = batch.expr
+            val = batch.val
+            clf_logits, log_prob_sum_old, tree, _ = model(inp=expr, length=length)
+            clf_logits_baseline, _, _, _ = model(inp=expr, length=length, self_critic=True)
+            reward = (-F.cross_entropy(clf_logits, val, reduce=False)).exp()
+            reward_baseline = (-F.cross_entropy(clf_logits_baseline, val, reduce=False)).exp()
+            advan = normalize_reward(reward - reward_baseline)
+            mem.push((expr, length, val, tree, advan, log_prob_sum_old))
 
 def normalize_reward(r):
     return r.div(r.std())
 
-def run_iter(model, model_old, criterion, optimizer,
-             params, batch, is_training, train_parser):
+def run_iter(model, optimizer, params, batch, mem: ReplayMem, is_training, train_parser):
     model.train(is_training)
-    expr, length = batch.expr
-    val = batch.val
+
     if train_parser:
         model.train_parser()
+        expr, length, val, tree, advan, log_prob_sum_old = mem.sample()
+        clf_logits, log_prob_sum_new, tree_new, entropy = model(inp=expr, length=length, tree=tree)
+        r = (log_prob_sum_new - log_prob_sum_old).exp()
+        r_clipped = torch.clamp(r, min=1-0.25, max=1+0.25)
+        advan_mask = advan.gt(0).float()
+        effect_bsz = max(advan_mask.sum(), 1)
+        # advan.masked_fill_(advan_mask, 0)
+        advan = advan * advan_mask
+        ppo_loss = -torch.min(r * advan, r_clipped * advan).sum().div(effect_bsz)
+        loss = ppo_loss - 1e-2 * entropy.sum().div(effect_bsz)
+        # ppo_loss = -torch.min(r * advan, r_clipped * advan).mean()
+        # loss = ppo_loss - 1e-2 * entropy.mean()
         with torch.no_grad():
-            clf_logits, log_prob_sum_old, tree, _ = model_old(inp=expr, length=length)
-            clf_logits_baseline, _, _, _ = model_old(inp=expr, length=length, self_critic=True)
-        _, log_prob_sum, _, entropy = model(inp=expr, length=length, tree=tree)
-        # reward = normalize_reward((-F.cross_entropy(clf_logits, val, reduce=False)).exp())
-        reward = normalize_reward((-F.cross_entropy(clf_logits, val, reduce=False)))
-        # reward_baseline = normalize_reward((-F.cross_entropy(clf_logits_baseline, val, reduce=False)).exp())
-        reward_baseline = normalize_reward((-F.cross_entropy(clf_logits_baseline, val, reduce=False)))
-        advan = reward - reward_baseline
-        # advan = reward
-
-        r = (log_prob_sum - log_prob_sum_old).exp()
-        r_clipped = torch.clamp(r, min=1 - 0.25, max=1 + 0.25)
-        ppo_loss = -torch.min(r * advan, r_clipped * advan).mean()
-        loss = ppo_loss - 1e-2 * entropy.mean()
-        # print(f'PPO loss{ppo_loss:.4f}')
-        # print(f'Entropy loss {entropy.mean():.4f}')
+            clf_logits_baseline, _, _, _ = model(inp=expr, length=length, self_critic=True)
+            reward = (-F.cross_entropy(clf_logits, val, reduce=False)).exp()
+            reward_baseline = (-F.cross_entropy(clf_logits_baseline, val, reduce=False)).exp()
+            advan_new = normalize_reward(reward - reward_baseline)
+            mem.push((expr, length, val, tree_new, advan_new.detach(), log_prob_sum_new.detach()))
     else:
         model.train_composition()
+        expr, length = batch.expr
+        val = batch.val
         clf_logits, _, _, _ = model(inp=expr, length=length, self_critic=True)
-        loss = criterion(clf_logits, val)
+        loss = F.cross_entropy(clf_logits, val)
 
     if is_training:
         optimizer.zero_grad()
@@ -154,16 +180,10 @@ def train(args):
                          nwords=len(EXPR.vocab),
                          edim=args.edim,
                          hdim=args.hdim)
-    model_old = ListopsModel(nclasses=len(VAL.vocab),
-                             nwords=len(EXPR.vocab),
-                             edim=args.edim,
-                             hdim=args.hdim)
-    model_old.load_state_dict(model.state_dict())
 
     logging.info(f'Using device {args.gpu}')
     device = torch.device(args.gpu if args.gpu != -1 else 'cpu')
     model.to(device)
-    model_old.to(device)
 
     params = [p for p in model.parameters() if p.requires_grad]
     if args.optimizer == 'adam':
@@ -180,7 +200,12 @@ def train(args):
                                                factor=0.5,
                                                patience=20 * args.halve_lr_every,
                                                verbose=True)
-    criterion = nn.CrossEntropyLoss()
+
+    mem = ReplayMem(nbatch=len(train_iter))
+    logging.info('Loading mem ...')
+    load_mem(mem, model, data_iter=train_iter)
+    logging.info('Loading mem done.')
+
     num_train_batches = len(train_iter)
     valid_every = num_train_batches // 1
     best_valid_acc = 0
@@ -193,23 +218,20 @@ def train(args):
             if i % (args.parser_batch + 1) == 0:
                 # train composition function
                 loss, acc = run_iter(model,
-                                     model_old,
-                                     criterion,
                                      optimizer,
                                      params,
                                      batch,
+                                     mem,
                                      is_training=True,
                                      train_parser=False)
                 loss_comp.append(loss.item())
-                model_old.load_state_dict(model.state_dict())
             else:
                 # train parser
                 loss, acc = run_iter(model,
-                                     model_old,
-                                     criterion,
                                      optimizer,
                                      params,
                                      batch,
+                                     mem,
                                      is_training=True,
                                      train_parser=True)
                 loss_parser.append(loss.item())
@@ -225,11 +247,10 @@ def train(args):
             for batch_valid in tqdm.tqdm(valid_iter):
                 valid_loss, valid_acc = \
                     run_iter(model,
-                             model_old,
-                             criterion,
                              optimizer,
                              params,
                              batch_valid,
+                             mem,
                              is_training=False,
                              train_parser=False)
                 valid_losses.append(valid_loss.item())
