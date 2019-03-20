@@ -150,11 +150,14 @@ def run_iter(model, optimizer, params, batch, mem: ReplayMem, is_training, train
         # ppo_loss = -torch.min(r * advan, r_clipped * advan).mean()
         # loss = ppo_loss - 1e-2 * entropy.mean()
         with torch.no_grad():
+            expr, length = batch.expr
+            val = batch.val
+            clf_logits, log_prob_sum_old, tree, _ = model(inp=expr, length=length)
             clf_logits_baseline, _, _, _ = model(inp=expr, length=length, self_critic=True)
             reward = (-F.cross_entropy(clf_logits, val, reduce=False)).exp()
             reward_baseline = (-F.cross_entropy(clf_logits_baseline, val, reduce=False)).exp()
-            advan_new = normalize_reward(reward - reward_baseline)
-            mem.push((expr, length, val, tree_new, advan_new.detach(), log_prob_sum_new.detach()))
+            advan = normalize_reward(reward - reward_baseline)
+            mem.push((expr, length, val, tree, advan, log_prob_sum_old))
     else:
         model.train_composition()
         expr, length = batch.expr
