@@ -127,8 +127,7 @@ class CoopLatentTreeRL(nn.Module):
         left_mask = 1 - select_mask_cumsum
         left_mask_expand = left_mask.unsqueeze(2).expand_as(old_h_left)
         right_mask = select_mask_cumsum - select_mask
-        right_mask_expand = right_mask.unsqueeze(2).expand_as(
-            old_h_right)  # here left/right_mask does not include the selected point
+        right_mask_expand = right_mask.unsqueeze(2).expand_as(old_h_right)  # here left/right_mask does not include the selected point
         new_h = (select_mask_expand * new_h
                  + left_mask_expand * old_h_left
                  + right_mask_expand * old_h_right)
@@ -161,6 +160,7 @@ class CoopLatentTreeRL(nn.Module):
                         old_state=state,
                         new_state=new_state,
                         mask=length_mask[:, i + 1:],
+                        self_critic=self_critic,
                         indices_given=tree[i] if tree else None)  # select_mask: (bsz, cur_len), i.e. select_dist over
                 #  constituents at each time step
                 new_state = (new_h, new_c)

@@ -106,64 +106,71 @@ def build_iters(args):
 
 class ReplayMem(object):
 
-    def __init__(self, nbatch):
-        self.mem = [None for _ in range(nbatch)]
-        self.ptr = 0
-
-    def sample(self):
-        return random.choice(self.mem)
+    def __init__(self):
+        self.mem = []
 
     def push(self, batch):
-        self.mem[self.ptr % len(self.mem)] = batch
-        self.ptr += 1
+        self.mem.append(batch)
 
-def load_mem(mem: ReplayMem, model, data_iter):
+    def __len__(self):
+        return len(self.mem)
+
+    def clear(self):
+        self.mem.clear()
+
+def xent(logits, tar):
+    probs = F.softmax(logits, dim=1)
+    log_inv_prob = torch.log(1 - probs)
+    reward = -torch.gather(log_inv_prob,
+                               dim=1,
+                               index=tar.view(-1, 1))
+    return reward.squeeze()
+
+def lllhood(logits, tar):
+    probs = F.softmax(logits, dim=1)
+    log_inv_prob = torch.log(probs)
+    reward = torch.gather(log_inv_prob,
+                           dim=1,
+                           index=tar.view(-1, 1))
+    return reward.squeeze()
+
+def load_mem(mem: ReplayMem, model, batch):
     with torch.no_grad():
-        for i, batch in enumerate(tqdm.tqdm(data_iter)):
-            expr, length = batch.expr
-            val = batch.val
-            clf_logits, log_prob_sum_old, tree, _ = model(inp=expr, length=length)
-            clf_logits_baseline, _, _, _ = model(inp=expr, length=length, self_critic=True)
-            reward = (-F.cross_entropy(clf_logits, val, reduce=False)).exp()
-            reward_baseline = (-F.cross_entropy(clf_logits_baseline, val, reduce=False)).exp()
-            advan = normalize_reward(reward - reward_baseline)
-            mem.push((expr, length, val, tree, advan, log_prob_sum_old))
+        expr, length = batch.expr
+        val = batch.val
+        clf_logits, log_prob_sum_old, tree, _ = model(inp=expr, length=length)
+        clf_logits_baseline, _, _, _ = model(inp=expr, length=length, self_critic=True)
+        # reward = xent(clf_logits, val)
+        # reward_baseline = xent(clf_logits_baseline, val)
+        reward = lllhood(clf_logits, val)
+        reward_baseline = lllhood(clf_logits_baseline, val)
+        advan = normalize(reward - reward_baseline)
+        mem.push((expr, length, val, tree, advan, log_prob_sum_old))
 
-def normalize_reward(r):
-    return r.div(r.std())
+# def normalize(r):
+#     return (r - r.mean()).div(r.std() + 1e-8)
+def normalize(r):
+    return r.div(r.std() + 1e-8)
 
-def run_iter(model, optimizer, params, batch, mem: ReplayMem, is_training, train_parser):
+def run_iter(model, optimizer, params, batch, is_training, train_parser):
     model.train(is_training)
 
     if train_parser:
         model.train_parser()
-        expr, length, val, tree, advan, log_prob_sum_old = mem.sample()
+        expr, length, val, tree, advan, log_prob_sum_old = batch
         clf_logits, log_prob_sum_new, tree_new, entropy = model(inp=expr, length=length, tree=tree)
         r = (log_prob_sum_new - log_prob_sum_old).exp()
         r_clipped = torch.clamp(r, min=1-0.25, max=1+0.25)
-        advan_mask = advan.gt(0).float()
-        effect_bsz = max(advan_mask.sum(), 1)
-        # advan.masked_fill_(advan_mask, 0)
-        advan = advan * advan_mask
-        ppo_loss = -torch.min(r * advan, r_clipped * advan).sum().div(effect_bsz)
-        loss = ppo_loss - 1e-2 * entropy.sum().div(effect_bsz)
-        # ppo_loss = -torch.min(r * advan, r_clipped * advan).mean()
-        # loss = ppo_loss - 1e-2 * entropy.mean()
-        with torch.no_grad():
-            expr, length = batch.expr
-            val = batch.val
-            clf_logits, log_prob_sum_old, tree, _ = model(inp=expr, length=length)
-            clf_logits_baseline, _, _, _ = model(inp=expr, length=length, self_critic=True)
-            reward = (-F.cross_entropy(clf_logits, val, reduce=False)).exp()
-            reward_baseline = (-F.cross_entropy(clf_logits_baseline, val, reduce=False)).exp()
-            advan = normalize_reward(reward - reward_baseline)
-            mem.push((expr, length, val, tree, advan, log_prob_sum_old))
+        loss_policy = -torch.min(r * advan, r_clipped * advan).mean()
+        loss_entropy = entropy.mean()
+        loss = loss_policy - 1e-2 * loss_entropy
     else:
         model.train_composition()
         expr, length = batch.expr
         val = batch.val
         clf_logits, _, _, _ = model(inp=expr, length=length, self_critic=True)
         loss = F.cross_entropy(clf_logits, val)
+        loss_entropy = None
 
     if is_training:
         optimizer.zero_grad()
@@ -174,7 +181,7 @@ def run_iter(model, optimizer, params, batch, mem: ReplayMem, is_training, train
     pred = clf_logits.max(dim=1)[1]
     acc = torch.eq(val, pred).float().mean()
 
-    return loss, acc
+    return loss, acc, loss_entropy
 
 
 def train(args):
@@ -198,69 +205,67 @@ def train(args):
     else:
         raise NotImplementedError
     optimizer = optim_class(params=params, weight_decay=args.l2reg)
-    scheduler = lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
-                                               mode='max',
-                                               factor=0.5,
-                                               patience=20 * args.halve_lr_every,
-                                               verbose=True)
+    # scheduler = lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
+    #                                            mode='max',
+    #                                            factor=0.5,
+    #                                            patience=20 * args.halve_lr_every,
+    #                                            verbose=True)
 
-    mem = ReplayMem(nbatch=len(train_iter))
-    logging.info('Loading mem ...')
-    load_mem(mem, model, data_iter=train_iter)
-    logging.info('Loading mem done.')
-
-    num_train_batches = len(train_iter)
-    valid_every = num_train_batches // 1
+    mem = ReplayMem()
     best_valid_acc = 0
 
     for epoch in range(args.nepoches):
-        train_iter_tqdm = tqdm.tqdm(train_iter)
+        model.train()
+        train_iter_tqdm = tqdm.tqdm(train_iter, ncols=100)
         loss_parser = []
         loss_comp = []
+        entropy_lst = []
         for i, batch in enumerate(train_iter_tqdm):
-            if i % (args.parser_batch + 1) == 0:
-                # train composition function
-                loss, acc = run_iter(model,
-                                     optimizer,
-                                     params,
-                                     batch,
-                                     mem,
-                                     is_training=True,
-                                     train_parser=False)
-                loss_comp.append(loss.item())
+            if len(mem) != args.K:
+                # loading examples to replay memory
+                load_mem(mem, model, batch)
             else:
-                # train parser
-                loss, acc = run_iter(model,
-                                     optimizer,
-                                     params,
-                                     batch,
-                                     mem,
-                                     is_training=True,
-                                     train_parser=True)
-                loss_parser.append(loss.item())
+                # done loading, now update
+                # update policy
+                assert len(mem.mem) == args.K
+                for batch_replay in mem.mem:
+                    loss, acc, entropy = run_iter(model, optimizer, params, batch_replay,
+                                         is_training=True, train_parser=True)
+                    loss_parser.append(loss.item())
+                    entropy_lst.append(entropy.item())
+                mem.clear()
+                # update others
+                loss, acc, _ = run_iter(model, optimizer, params, batch,
+                                     is_training=True, train_parser=False)
+                loss_comp.append(loss.item())
+                train_iter_tqdm.set_description(f'Ploss {np.mean(loss_parser[-args.K:]):.4f} '
+                                                f'Closs {loss_comp[-1]:.4f} '
+                                                f'Ent {np.mean(entropy_lst[-args.K:]):.4f}')
+                train_iter_tqdm.refresh()
 
         print(f'Epoch={epoch} '
               f'Loss(parser)={np.mean(loss_parser):.4f} '
-              f'Loss(comp)={np.mean(loss_comp):.4f}')
+              f'Loss(comp)={np.mean(loss_comp):.4f} '
+              f'Entropy={np.mean(entropy_lst):.4f}')
 
         # valid
         with torch.no_grad():
+            model.eval()
             valid_losses = []
             valid_accs = []
             for batch_valid in tqdm.tqdm(valid_iter):
-                valid_loss, valid_acc = \
+                valid_loss, valid_acc, _ = \
                     run_iter(model,
                              optimizer,
                              params,
                              batch_valid,
-                             mem,
                              is_training=False,
                              train_parser=False)
                 valid_losses.append(valid_loss.item())
                 valid_accs.append(valid_acc.item())
             valid_acc = np.mean(valid_accs)
             valid_loss = np.mean(valid_losses)
-            scheduler.step(valid_acc)
+            # scheduler.step(valid_acc)
             logging.info(f'Epoch {epoch} '
                          f'Valid loss {valid_loss:.4f} '
                          f'Valid acc {valid_acc:.4f} ')
@@ -283,7 +288,8 @@ def main():
     parser.add_argument('-gpu', type=int, default=-1)
     parser.add_argument('-optimizer', type=str, default='adadelta')
     parser.add_argument('-nepoches', type=int, default=1000)
-    parser.add_argument('-parser_batch', type=int, default=15)
+    # parser.add_argument('-parser_batch', type=int, default=50)
+    parser.add_argument('-K', type=int, default=15)
     parser.add_argument('--halve-lr-every', type=int, default=2)
     parser.add_argument('-seed', type=int, default=1000)
 

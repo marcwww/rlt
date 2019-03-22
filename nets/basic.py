@@ -10,6 +10,19 @@ import numpy as np
 import logging
 LOGGER = logging.getLogger(__name__)
 
+def progress_bar(percent, loss, epoch):
+    """Prints the progress until the next report."""
+
+    fill = int(percent * 40)
+    str_disp = "\r[%s%s]: %.2f/epoch %d" % ('=' * fill,
+                                         ' ' * (40 - fill),
+                                         percent,
+                                         epoch)
+    for k, v in loss.items():
+        str_disp += ' (%s:%.4f)' % (k, v)
+
+    print(str_disp, end='')
+
 def convert_to_one_hot(indices, num_classes):
     """
     Args:
