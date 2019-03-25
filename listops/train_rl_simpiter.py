@@ -79,28 +79,17 @@ def build_iters(args):
     valid = Dataset(examples_valid, fields=[('expr', EXPR),
                                             ('val', VAL)])
 
-    def batch_size_fn(new_example, current_count, ebsz):
-        return ebsz + (len(new_example.expr) / len_ave) ** 0.3
-        # return ebsz + (len(new_example.expr) / len_ave) ** 1
-
     device = torch.device(args.gpu if args.gpu != -1 else 'cpu')
-    train_iter = basic.BucketIterator(train,
-                                      batch_size=args.bsz,
-                                      sort=True,
-                                      shuffle=True,
-                                      repeat=False,
-                                      sort_key=lambda x: len(x.expr),
-                                      batch_size_fn=batch_size_fn,
-                                      device=device)
-
-    valid_iter = basic.BucketIterator(valid,
-                                      batch_size=args.bsz,
-                                      sort=True,
-                                      shuffle=True,
-                                      repeat=False,
-                                      sort_key=lambda x: len(x.expr),
-                                      batch_size_fn=batch_size_fn,
-                                      device=device)
+    train_iter = torchtext.data.Iterator(train,
+                                         batch_size=args.bsz,
+                                         shuffle=True,
+                                         repeat=False,
+                                         device=device)
+    valid_iter = torchtext.data.Iterator(valid,
+                                         batch_size=args.bsz,
+                                         shuffle=True,
+                                         repeat=False,
+                                         device=device)
 
     return train_iter, valid_iter, EXPR, VAL
 
@@ -305,11 +294,11 @@ def main():
 
     args = parser.parse_args()
     basic.init_seed(args.seed)
-    # try:
-    logging.info(f'params:{args}')
-    train(args)
-    # except:
-    #     logging.info(f'params:{args}')
+    try:
+        logging.info(f'params:{args}')
+        train(args)
+    except:
+        logging.info(f'params:{args}')
 
 if __name__ == '__main__':
     main()

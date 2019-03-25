@@ -156,7 +156,6 @@ def run_iter(model, optimizer, params, batch, is_training, train_parser, entropy
     model.train(is_training)
 
     if train_parser:
-        model.train_parser()
         expr, length, val, tree, advan, log_prob_sum_old = batch
         clf_logits, log_prob_sum_new, tree_new, entropy = model(inp=expr, length=length, tree=tree)
         r = (log_prob_sum_new - log_prob_sum_old).exp()
@@ -165,7 +164,6 @@ def run_iter(model, optimizer, params, batch, is_training, train_parser, entropy
         loss_entropy = entropy.mean()
         loss = loss_policy - entropy_coef * loss_entropy
     else:
-        model.train_composition()
         expr, length = batch.expr
         val = batch.val
         clf_logits, _, _, _ = model(inp=expr, length=length, self_critic=True)
@@ -199,7 +197,9 @@ def train(args):
         model.load_state_dict(torch.load(args.load))
         logging.info(f'Loading from {args.load}')
 
-    params = [p for p in model.parameters() if p.requires_grad]
+    params_parser = [p for name, p in model.named_parameters() if p.requires_grad and 'query' in name]
+    params_comp = [p for name, p in model.named_parameters() if p.requires_grad and 'query' not in name]
+
     if args.optimizer == 'adam':
         optim_class = optim.Adam
     elif args.optimizer == 'adagrad':
@@ -208,7 +208,9 @@ def train(args):
         optim_class = optim.Adadelta
     else:
         raise NotImplementedError
-    optimizer = optim_class(params=params, weight_decay=args.l2reg)
+    optimizer_parser = optim_class(params=params_parser, weight_decay=args.l2reg)
+    optimizer_comp = optim_class(params=params_comp, weight_decay=args.l2reg)
+
     # scheduler = lr_scheduler.ReduceLROnPlateau(optimizer=optimizer,
     #                                            mode='max',
     #                                            factor=0.5,
@@ -231,13 +233,13 @@ def train(args):
             else:
                 # done loading, now update
                 # update others
-                loss, acc, _ = run_iter(model, optimizer, params, batch,
+                loss, acc, _ = run_iter(model, optimizer_comp, params_comp, batch,
                                         is_training=True, train_parser=False)
                 loss_comp.append(loss.item())
                 # update policy
                 assert len(mem.mem) == args.K
                 for batch_replay in mem.mem:
-                    loss, acc, entropy = run_iter(model, optimizer, params, batch_replay,
+                    loss, acc, entropy = run_iter(model, optimizer_parser, params_parser, batch_replay,
                                                   is_training=True, train_parser=True,
                                                   entropy_coef=args.entropy_coef)
                     loss_parser.append(loss.item())
@@ -261,8 +263,8 @@ def train(args):
             for batch_valid in tqdm.tqdm(valid_iter):
                 valid_loss, valid_acc, _ = \
                     run_iter(model,
-                             optimizer,
-                             params,
+                             optimizer_comp,
+                             params_comp,
                              batch_valid,
                              is_training=False,
                              train_parser=False)
@@ -300,16 +302,15 @@ def main():
     parser.add_argument('-seed', type=int, default=1000)
     parser.add_argument('-entropy_coef', type=float, default=1e-2)
     parser.add_argument('-max_length', type=float, default=100)
-    # parser.add_argument('-load', type=str, default='epoch-734loss-1.2901acc-0.566348.pkl')
     parser.add_argument('-load', type=str, default=None)
 
     args = parser.parse_args()
     basic.init_seed(args.seed)
-    # try:
-    logging.info(f'params:{args}')
-    train(args)
-    # except:
-    #     logging.info(f'params:{args}')
+    try:
+        logging.info(f'params:{args}')
+        train(args)
+    except:
+        logging.info(f'params:{args}')
 
 if __name__ == '__main__':
     main()

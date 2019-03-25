@@ -60,7 +60,6 @@ class CoopLatentTreeRL(nn.Module):
         self.treelstm_layer = BinaryTreeLSTMLayer(hidden_dim)
         self.comp_query = nn.Parameter(torch.FloatTensor(hidden_dim))
         self.reset_parameters()
-        self.train_parser_flag = True
 
     def reset_parameters(self):
         init.kaiming_normal_(self.word_linear.weight.data)
@@ -75,7 +74,6 @@ class CoopLatentTreeRL(nn.Module):
 
         self.apply(fix)
         self.comp_query.requires_grad = True
-        self.train_parser_flag = True
 
     def train_composition(self):
         def dyn(module: nn.Module):
@@ -84,7 +82,6 @@ class CoopLatentTreeRL(nn.Module):
 
         self.apply(dyn)
         self.comp_query.requires_grad = False
-        self.train_parser_flag = False
 
     @staticmethod
     def update_state(old_state, new_state, done_mask):
@@ -159,21 +156,24 @@ class CoopLatentTreeRL(nn.Module):
                     self.select_composition(
                         old_state=state,
                         new_state=new_state,
-                        mask=length_mask[:, i + 1:],
+                        mask=length_mask[:, i + 1:], # (i + 1) means for the new hiddens
                         self_critic=self_critic,
                         indices_given=tree[i] if tree else None)  # select_mask: (bsz, cur_len), i.e. select_dist over
                 #  constituents at each time step
                 new_state = (new_h, new_c)
                 indices_select.append(indices)
                 log_prob_sum += log_prob
-                entropy_sum += entropy
+                entropy_sum += entropy * length_mask[:, i + 1].float()
 
             done_mask = length_mask[:, i + 1]
             state = self.update_state(old_state=state, new_state=new_state,
-                                      done_mask=done_mask)  # this step is to retain the finised final hiddens
+                                      done_mask=done_mask)  # this step is to retain the finished final hiddens
 
         h, c = state  # h/c: (bsz, 1, hdim)
 
         assert h.size(1) == 1 and c.size(1) == 1
 
-        return h.squeeze(1), c.squeeze(1), indices_select, log_prob_sum, entropy_sum.div(length.float())
+        return h.squeeze(1), c.squeeze(1), \
+               indices_select, \
+               log_prob_sum, \
+               entropy_sum.div(length.float()) # - 1 for there are actual (length - 1) steps
