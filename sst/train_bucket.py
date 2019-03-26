@@ -10,6 +10,8 @@ from torch import nn, optim
 from torch.optim import lr_scheduler
 from torch.nn.utils import clip_grad_norm_
 from torchtext import data, datasets
+import numpy as np
+from nets import basic
 
 from sst.model import SSTModel
 import crash_on_ipy
@@ -31,14 +33,37 @@ def train(args):
         fine_grained=args.fine_grained, train_subtrees=True,
         filter_pred=filter_pred)
 
+    lens = []
+    for e in dataset_splits[0].examples:
+        lens.append(len(e.text))
+    len_ave = np.mean(lens)
+
     text_field.build_vocab(*dataset_splits, vectors=args.pretrained)
     label_field.build_vocab(*dataset_splits)
 
     logging.info(f'Initialize with pretrained vectors: {args.pretrained}')
     logging.info(f'Number of classes: {len(label_field.vocab)}')
 
-    train_loader, valid_loader, _ = data.BucketIterator.splits(
-        datasets=dataset_splits, batch_size=args.batch_size, device=args.device)
+    def batch_size_fn(new_example, current_count, ebsz):
+        return ebsz + (len(new_example.text) / len_ave) ** 0.3
+
+    device = torch.device(args.gpu if args.gpu != -1 else 'cpu')
+    train_loader = basic.BucketIterator(dataset_splits[0],
+                                        batch_size=args.batch_size,
+                                        sort=True,
+                                        shuffle=True,
+                                        repeat=False,
+                                        sort_key=lambda x: len(x.text),
+                                        batch_size_fn=batch_size_fn,
+                                        device=device)
+    valid_loader = basic.BucketIterator(dataset_splits[1],
+                                        batch_size=args.batch_size,
+                                        sort=True,
+                                        shuffle=True,
+                                        repeat=False,
+                                        sort_key=lambda x: len(x.text),
+                                        batch_size_fn=batch_size_fn,
+                                        device=device)
 
     num_classes = len(label_field.vocab)
     model = SSTModel(num_classes=num_classes, num_words=len(text_field.vocab),
@@ -55,8 +80,8 @@ def train(args):
     if args.fix_word_embedding:
         logging.info('Will not update word embeddings')
         model.word_embedding.weight.requires_grad = False
-    logging.info(f'Using device {args.device}')
-    model.to(args.device)
+    logging.info(f'Using device {args.gpu}')
+    model.to(device)
     params = [p for p in model.parameters() if p.requires_grad]
     if args.optimizer == 'adam':
         optimizer_class = optim.Adam
@@ -102,48 +127,49 @@ def train(args):
     validate_every = num_train_batches // 20
     best_vaild_accuacy = 0
     iter_count = 0
-    for batch_iter, train_batch in enumerate(tqdm.tqdm(train_loader)):
-        train_loss, train_accuracy = run_iter(
-            batch=train_batch, is_training=True)
-        iter_count += 1
-        add_scalar_summary(
-            summary_writer=train_summary_writer,
-            name='loss', value=train_loss, step=iter_count)
-        add_scalar_summary(
-            summary_writer=train_summary_writer,
-            name='accuracy', value=train_accuracy, step=iter_count)
+    for epoch in range(args.max_epoch):
+        for batch_iter, train_batch in enumerate(tqdm.tqdm(train_loader)):
+            train_loss, train_accuracy = run_iter(
+                batch=train_batch, is_training=True)
+            iter_count += 1
+            add_scalar_summary(
+                summary_writer=train_summary_writer,
+                name='loss', value=train_loss, step=iter_count)
+            add_scalar_summary(
+                summary_writer=train_summary_writer,
+                name='accuracy', value=train_accuracy, step=iter_count)
 
-        if (batch_iter + 1) % validate_every == 0:
-            valid_loss_sum = valid_accuracy_sum = 0
-            num_valid_batches = len(valid_loader)
-            for valid_batch in valid_loader:
-                valid_loss, valid_accuracy = run_iter(
-                    batch=valid_batch, is_training=False)
-                valid_loss_sum += valid_loss.item()
-                valid_accuracy_sum += valid_accuracy.item()
-            valid_loss = valid_loss_sum / num_valid_batches
-            valid_accuracy = valid_accuracy_sum / num_valid_batches
-            add_scalar_summary(
-                summary_writer=valid_summary_writer,
-                name='loss', value=valid_loss, step=iter_count)
-            add_scalar_summary(
-                summary_writer=valid_summary_writer,
-                name='accuracy', value=valid_accuracy, step=iter_count)
-            scheduler.step(valid_accuracy)
-            progress = train_loader.iterations / len(train_loader)
-            logging.info(f'Epoch {progress:.2f}: '
-                         f'valid loss = {valid_loss:.4f}, '
-                         f'valid accuracy = {valid_accuracy:.4f}')
-            if valid_accuracy > best_vaild_accuacy:
-                best_vaild_accuacy = valid_accuracy
-                model_filename = (f'nets-{progress:.2f}'
-                                  f'-{valid_loss:.4f}'
-                                  f'-{valid_accuracy:.4f}.pkl')
-                model_path = os.path.join(args.save_dir, model_filename)
-                torch.save(model.state_dict(), model_path)
-                print(f'Saved the new best nets to {model_path}')
-            if progress > args.max_epoch:
-                break
+            if (batch_iter + 1) % validate_every == 0:
+                valid_loss_sum = valid_accuracy_sum = 0
+                num_valid_batches = len(valid_loader)
+                for valid_batch in valid_loader:
+                    valid_loss, valid_accuracy = run_iter(
+                        batch=valid_batch, is_training=False)
+                    valid_loss_sum += valid_loss.item()
+                    valid_accuracy_sum += valid_accuracy.item()
+                valid_loss = valid_loss_sum / num_valid_batches
+                valid_accuracy = valid_accuracy_sum / num_valid_batches
+                add_scalar_summary(
+                    summary_writer=valid_summary_writer,
+                    name='loss', value=valid_loss, step=iter_count)
+                add_scalar_summary(
+                    summary_writer=valid_summary_writer,
+                    name='accuracy', value=valid_accuracy, step=iter_count)
+                scheduler.step(valid_accuracy)
+                progress = train_loader.iterations / len(train_loader)
+                logging.info(f'Epoch {epoch}: '
+                             f'valid loss = {valid_loss:.4f}, '
+                             f'valid accuracy = {valid_accuracy:.4f}')
+                if valid_accuracy > best_vaild_accuacy:
+                    best_vaild_accuacy = valid_accuracy
+                    model_filename = (f'nets-{progress:.2f}'
+                                      f'-{valid_loss:.4f}'
+                                      f'-{valid_accuracy:.4f}.pkl')
+                    model_path = os.path.join(args.save_dir, model_filename)
+                    torch.save(model.state_dict(), model_path)
+                    print(f'Saved the new best nets to {model_path}')
+                if progress > args.max_epoch:
+                    break
 
 
 def main():
@@ -163,7 +189,7 @@ def main():
     # parser.add_argument('--pretrained', default=None)
     parser.add_argument('--fix-word-embedding', default=False,
                         action='store_true')
-    parser.add_argument('--device', default='cpu', type=str)
+    parser.add_argument('-gpu', default=-1, type=int)
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument('--max-epoch', type=int, default=1000)
     parser.add_argument('--save-dir', type=str, default='.')
@@ -171,6 +197,7 @@ def main():
     parser.add_argument('--optimizer', default='adadelta')
     parser.add_argument('--fine-grained', default=True, action='store_true')
     parser.add_argument('--halve-lr-every', default=2, type=int)
+    # parser.add_argument('--lower', default=True, action='store_true')
     parser.add_argument('--lower', default=False, action='store_true')
     args = parser.parse_args()
     train(args)

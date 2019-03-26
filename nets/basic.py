@@ -8,6 +8,7 @@ import random
 import time
 import numpy as np
 import logging
+import nltk
 LOGGER = logging.getLogger(__name__)
 
 def progress_bar(percent, loss, epoch):
@@ -222,3 +223,18 @@ def pool(data, batch_size, key, batch_size_fn=lambda new, count, sofar: count,
         else:
             for b in list(p_batch):
                 yield b
+
+
+def get_brackets(tree, idx=0):
+    brackets = set()
+    if isinstance(tree, list) or isinstance(tree, nltk.Tree):
+        for node in tree:
+            node_brac, next_idx = get_brackets(node, idx)
+            if next_idx - idx > 1:
+                brackets.add((idx, next_idx))
+                brackets.update(node_brac)
+            idx = next_idx
+        return brackets, idx
+    else:
+        return brackets, idx + 1
+

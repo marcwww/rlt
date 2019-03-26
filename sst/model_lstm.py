@@ -1,7 +1,6 @@
 from torch import nn
 from torch.nn import init
 
-from nets.treelstm import BinaryTreeLSTM
 from nets.lstm import LSTM
 
 
@@ -62,7 +61,7 @@ class SSTModel(nn.Module):
 
     def __init__(self, num_classes, num_words, word_dim, hidden_dim,
                  clf_hidden_dim, clf_num_layers, use_leaf_rnn, bidirectional,
-                 intra_attention, use_batchnorm, dropout_prob):
+                 intra_attention, use_batchnorm, dropout_prob, pooling):
         super(SSTModel, self).__init__()
         self.num_classes = num_classes
         self.word_dim = word_dim
@@ -74,15 +73,17 @@ class SSTModel(nn.Module):
         self.intra_attention = intra_attention
         self.use_batchnorm = use_batchnorm
         self.dropout_prob = dropout_prob
+        self.pooling = pooling
 
         self.dropout = nn.Dropout(dropout_prob)
         self.word_embedding = nn.Embedding(num_embeddings=num_words,
                                            embedding_dim=word_dim)
-        self.encoder = BinaryTreeLSTM(word_dim=word_dim, hidden_dim=hidden_dim,
-                                      use_leaf_rnn=use_leaf_rnn,
-                                      intra_attention=intra_attention,
-                                      gumbel_temperature=1,
-                                      bidirectional=bidirectional)
+        self.encoder = LSTM(word_dim=word_dim,
+                            hidden_dim=hidden_dim,
+                            use_leaf_rnn=use_leaf_rnn,
+                            intra_attention=intra_attention,
+                            bidirectional=bidirectional,
+                            pooling=pooling)
         self.classifier = SSTClassifier(
             num_classes=num_classes, input_dim=hidden_dim if not bidirectional else hidden_dim * 2,
             hidden_dim=clf_hidden_dim, num_layers=clf_num_layers,
@@ -97,6 +98,6 @@ class SSTModel(nn.Module):
     def forward(self, words, length, tree=None):
         words_embed = self.word_embedding(words)
         words_embed = self.dropout(words_embed)
-        sentence_vector, _ = self.encoder(input=words_embed, length=length, tree=tree)
+        sentence_vector = self.encoder(input=words_embed, length=length, tree=tree)
         logits = self.classifier(sentence_vector)
         return logits
