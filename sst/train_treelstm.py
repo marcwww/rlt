@@ -98,9 +98,11 @@ def build_iters(args):
 
     ftrain = 'data/sst/sst/trees/train.txt'
     fvalid = 'data/sst/sst/trees/dev.txt'
+    ftest = 'data/sst/sst/trees/test.txt'
 
     examples_train, len_ave = load_examples(ftrain, subtrees=True)
     examples_valid, _ = load_examples(fvalid, subtrees=False)
+    examples_test, _ = load_examples(ftest, subtrees=False)
     train = Dataset(examples_train, fields=[('txt', TXT),
                                     ('tree', TREE),
                                     ('lbl', LBL)])
@@ -109,6 +111,9 @@ def build_iters(args):
     valid = Dataset(examples_valid, fields=[('txt', TXT),
                                     ('tree', TREE),
                                     ('lbl', LBL)])
+    test = Dataset(examples_test, fields=[('txt', TXT),
+                                          ('tree', TREE),
+                                          ('lbl', LBL)])
 
     def batch_size_fn(new_example, current_count, ebsz):
         return ebsz + (len(new_example.txt) / len_ave) ** 0.3
@@ -132,12 +137,46 @@ def build_iters(args):
                                       batch_size_fn=batch_size_fn,
                                       device=device)
 
-    return train_iter, valid_iter, (TXT, TREE, LBL)
+    test_iter = basic.BucketIterator(test,
+                                     batch_size=args.batch_size,
+                                     sort=True,
+                                     shuffle=True,
+                                     repeat=False,
+                                     sort_key=lambda x: len(x.txt),
+                                     batch_size_fn=batch_size_fn,
+                                     device=device)
 
+    return train_iter, valid_iter, test_iter, (TXT, TREE, LBL)
+
+
+def test(model, data_loader, args):
+
+    def run_iter(batch, is_training, latent_tree=True):
+        model.train(is_training)
+        words, length = batch.txt
+        label = batch.lbl
+        tree = batch.tree
+        logits = model(words=words, length=length,
+                       tree=tree if not latent_tree else None)
+        label_pred = logits.max(1)[1]
+        accuracy = torch.eq(label, label_pred).float().mean()
+        return accuracy
+
+    test_accuracy_sum = 0
+    num_test_batches = len(data_loader)
+    for valid_batch in data_loader:
+        test_accuracy = run_iter(
+            batch=valid_batch, is_training=False,
+            latent_tree=args.latent_tree)
+        test_accuracy_sum += test_accuracy.item()
+
+    test_accuracy = test_accuracy_sum / num_test_batches
+    # logging.info(f'test acc {test_accuracy:.4f}')
+    return test_accuracy
 
 def train(args):
 
-    train_loader, valid_loader, (TXT, TREE, LBL) = build_iters(args)
+    train_loader, valid_loader, test_loader, (TXT, TREE, LBL) = build_iters(args)
 
     num_classes = len(LBL.vocab)
     model = SSTModel(num_classes=num_classes, num_words=len(TXT.vocab),
@@ -240,16 +279,18 @@ def train(args):
                              f'valid loss = {valid_loss:.4f}, '
                              f'valid accuracy = {valid_accuracy:.4f}')
                 if valid_accuracy > best_vaild_accuacy:
+                    test_acc = test(model, test_loader, args)
                     best_vaild_accuacy = valid_accuracy
                     model_filename = (f'nets-{progress:.2f}'
                                       f'-{valid_loss:.4f}'
-                                      f'-{valid_accuracy:.4f}.pkl')
+                                      f'-{valid_accuracy:.4f}'
+                                      f'-{test_acc:.4f}.pkl')
                     model_path = os.path.join(args.save_dir, model_filename)
                     torch.save(model.state_dict(), model_path)
                     print(f'Saved the new best nets to {model_path}')
+                    logging.info(f'Test acc {test_acc:.4f}')
                 if progress > args.max_epoch:
                     break
-
 
 def main():
     parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
