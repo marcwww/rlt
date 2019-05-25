@@ -57,23 +57,6 @@ class SSTClassifier(nn.Module):
         return logits
 
 
-def init_lstm_icml(lstm, bi=False):
-    init.kaiming_normal_(lstm.weight_ih_l0.data)
-    init.orthogonal_(lstm.weight_hh_l0.data)
-    init.constant_(lstm.bias_ih_l0.data, val=0)
-    init.constant_(lstm.bias_hh_l0.data, val=0)
-    # Set forget bias to 1
-    lstm.bias_ih_l0.data.chunk(4)[1].fill_(1)
-
-    if bi:
-        init.kaiming_normal_(lstm.weight_ih_l0_reverse.data)
-        init.orthogonal_(lstm.weight_hh_l0_reverse.data)
-        init.constant_(lstm.bias_ih_l0_reverse.data, val=0)
-        init.constant_(lstm.bias_hh_l0_reverse.data, val=0)
-        # Set forget bias to 1
-        lstm.bias_ih_l0_reverse.data.chunk(4)[1].fill_(1)
-
-
 class SSTModel(nn.Module):
 
     def __init__(self, num_classes, num_words, word_dim, hidden_dim,
@@ -109,6 +92,7 @@ class SSTModel(nn.Module):
 
     def reset_parameters(self):
         init.normal_(self.word_embedding.weight.data, mean=0, std=0.01)
+        self.encoder.reset_parameters()
         self.classifier.reset_parameters()
 
     def forward(self, words, length, tree=None):
