@@ -40,6 +40,20 @@ def train(args):
     train_loader, valid_loader, _ = data.BucketIterator.splits(
         datasets=dataset_splits, batch_size=args.batch_size, device=args.device)
 
+    # samples_0 = []
+    # for b in train_loader:
+    #     samples_0.append(b)
+    #     if len(samples_0) > 5:
+    #         break
+    #
+    # samples_1 = []
+    # for b in train_loader:
+    #     samples_1.append(b)
+    #     if len(samples_1) > 5:
+    #         break
+
+
+
     num_classes = len(label_field.vocab)
     model = SSTModel(num_classes=num_classes, num_words=len(text_field.vocab),
                      word_dim=args.word_dim, hidden_dim=args.hidden_dim,

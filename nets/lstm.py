@@ -7,8 +7,6 @@ from torch.nn import init
 from . import basic
 
 
-
-
 class LSTM(nn.Module):
 
     def __init__(self,
@@ -163,7 +161,7 @@ class LSTM(nn.Module):
             state = state.chunk(chunks=2, dim=2)
         # state: (bsz, seq_len, hdim or hdim * 2) * 2
 
-        nodes = state[0] * length_mask.unsqueeze(-1).float() # (bsz, seq_len, hdim or hdim * 2)
+        nodes = state[0] * length_mask.unsqueeze(-1).float()  # (bsz, seq_len, hdim or hdim * 2)
         h, c = state  # h/c: (bsz, 1, hdim)
         if self.intra_attention:
             att_mask = length_mask.float()
@@ -193,4 +191,3 @@ class LSTM(nn.Module):
                 raise NotImplementedError
 
         return h.squeeze(1)
-

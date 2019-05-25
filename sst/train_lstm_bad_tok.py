@@ -4,7 +4,7 @@ import os
 import tqdm
 
 from tensorboardX import SummaryWriter
-
+from torch.nn import functional as F
 import torch
 from torch import nn, optim
 from torch.optim import lr_scheduler
@@ -24,38 +24,9 @@ logging.basicConfig(level=logging.INFO,
 
 class Example(object):
 
-    def __init__(self, txt, tree, lbl):
+    def __init__(self, txt, lbl):
         self.txt = txt
-        self.tree = tree
         self.lbl = lbl
-
-
-def brackets2indices(brackets):
-    def new_brackets(brackets, bracket_chosen):
-        res = set()
-        base = bracket_chosen[1]
-        for bracket in brackets:
-            if bracket != bracket_chosen:
-                l, r = bracket
-                l = l - 1 if l >= base else l
-                r = r - 1 if r >= base else r
-                res.add((l, r))
-        return res
-
-    indices = []
-    while len(brackets) > 1:
-        bracket_chosen = None
-        for bracket in brackets:
-            if bracket[1] - bracket[0] == 2:
-                bracket_chosen = bracket
-                break
-        # print(sorted(brackets))
-        # print(bracket_chosen)
-        brackets = new_brackets(brackets, bracket_chosen)
-        # print(sorted(brackets))
-        # print('-' * 50)
-        indices.append(bracket_chosen[0])
-    return indices
 
 
 def load_examples(fname, subtrees=False):
@@ -63,30 +34,12 @@ def load_examples(fname, subtrees=False):
     lens = []
     with open(fname, 'r') as f:
         lines = f.readlines()
-        for line in tqdm.tqdm(lines):
-            tree = Tree.fromstring(line.strip())
-            if subtrees:
-                for t in tree.subtrees():
-                    txt = t.leaves()
-                    lens.append(len(txt))
-                    lbl = t.label()
-                    brackets = basic.get_brackets(t)[0]
-                    brackets.add((0, len(txt)))
-                    brackets = sorted(brackets)
-                    indices = brackets2indices(brackets)
-                    assert len(indices) + 2 == len(txt) or len(txt) == 1
-                    examples.append(Example(txt, indices, lbl))
-            else:
-                t = tree
-                txt = t.leaves()
-                lens.append(len(txt))
-                lbl = t.label()
-                brackets = basic.get_brackets(t)[0]
-                brackets.add((0, len(txt)))
-                brackets = sorted(brackets)
-                indices = brackets2indices(brackets)
-                assert len(indices) + 2 == len(txt) or len(txt) == 1
-                examples.append(Example(txt, indices, lbl))
+        for line in lines:
+            txt, _, _, lbl = line.strip().split('\t')
+            txt = txt.split()
+            examples.append(Example(txt, lbl))
+            lens.append(len(txt))
+
     return examples, np.mean(lens)
 
 
@@ -100,23 +53,21 @@ def build_iters(args):
                       use_vocab=False,
                       pad_token=0)
 
-    ftrain = 'data/sst/sst/trees/train.txt'
-    fvalid = 'data/sst/sst/trees/dev.txt'
-    ftest = 'data/sst/sst/trees/test.txt'
+    ftrain = 'data/train.txt.tok.dep'
+    fvalid = 'data/valid.txt.tok.dep'
+    ftest = 'data/test.txt.tok.dep'
 
     examples_train, len_ave = load_examples(ftrain, subtrees=True)
     examples_valid, _ = load_examples(fvalid, subtrees=False)
     examples_test, _ = load_examples(ftest, subtrees=False)
     train = Dataset(examples_train, fields=[('txt', TXT),
-                                            ('tree', TREE),
                                             ('lbl', LBL)])
     TXT.build_vocab(train, vectors=args.pretrained)
     LBL.build_vocab(train)
+    print(LBL.vocab.itos)
     valid = Dataset(examples_valid, fields=[('txt', TXT),
-                                            ('tree', TREE),
                                             ('lbl', LBL)])
     test = Dataset(examples_test, fields=[('txt', TXT),
-                                          ('tree', TREE),
                                           ('lbl', LBL)])
 
     def batch_size_fn(new_example, current_count, ebsz):
@@ -158,9 +109,8 @@ def test(model, data_loader, args):
         model.train(is_training)
         words, length = batch.txt
         label = batch.lbl
-        tree = batch.tree
         logits = model(words=words, length=length,
-                       tree=tree if not latent_tree else None)
+                       tree=None)
         label_pred = logits.max(1)[1]
         accuracy = torch.eq(label, label_pred).float().mean()
         return accuracy
@@ -199,6 +149,10 @@ def train(args):
         model.word_embedding.weight.requires_grad = False
     logging.info(f'Using device {args.gpu}')
     device = torch.device(args.gpu if args.gpu != -1 else 'cpu')
+    if args.load is not None:
+        model.load_state_dict(torch.load(args.load))
+        logging.info(f'Loaded from {args.load}')
+
     model.to(device)
     params = [p for p in model.parameters() if p.requires_grad]
     if args.optimizer == 'adam':
@@ -224,12 +178,12 @@ def train(args):
         model.train(is_training)
         words, length = batch.txt
         label = batch.lbl
-        tree = batch.tree
         logits = model(words=words, length=length,
-                       tree=tree if not latent_tree else None)
+                       tree=None)
         label_pred = logits.max(1)[1]
         accuracy = torch.eq(label, label_pred).float().mean()
         loss = criterion(input=logits, target=label)
+        loss_ = F.cross_entropy(input=logits, target=label, reduce=False)
         if is_training:
             optimizer.zero_grad()
             loss.backward()
@@ -247,7 +201,12 @@ def train(args):
     validate_every = num_train_batches // 20
     best_vaild_accuacy = 0
     iter_count = 0
+
+    test_acc = test(model, test_loader, args)
+    print('Test', test_acc)
+
     for epoch in range(args.max_epoch):
+        loss_train = []
         for batch_iter, train_batch in enumerate(tqdm.tqdm(train_loader)):
             train_loss, train_accuracy = run_iter(
                 batch=train_batch, is_training=True,
@@ -259,6 +218,7 @@ def train(args):
             add_scalar_summary(
                 summary_writer=train_summary_writer,
                 name='accuracy', value=train_accuracy, step=iter_count)
+            loss_train.append(train_loss.item())
 
             if (batch_iter + 1) % validate_every == 0:
                 valid_loss_sum = valid_accuracy_sum = 0
@@ -281,6 +241,7 @@ def train(args):
                 progress = train_loader.iterations / len(train_loader)
                 logging.info(f'Epoch {epoch}: '
                              f'valid loss = {valid_loss:.4f}, '
+                             f'train loss = {np.mean(loss_train):.4f}, '
                              f'valid accuracy = {valid_accuracy:.4f}')
                 if valid_accuracy > best_vaild_accuacy:
                     test_acc = test(model, test_loader, args)
@@ -299,6 +260,7 @@ def train(args):
 
 def main():
     parser = argparse.ArgumentParser(fromfile_prefix_chars='@')
+    parser.add_argument('-load', type=str, default=None)
     parser.add_argument('--word-dim', type=int, default=300)
     parser.add_argument('--hidden-dim', type=int, default=300)
     parser.add_argument('--clf-hidden-dim', type=int, default=1024)

@@ -113,6 +113,7 @@ class BinaryTreeLSTM(nn.Module):
         old_c_left, old_c_right = old_c[:, :-1, :], old_c[:, 1:, :]
         comp_weights = (self.comp_query * new_h).sum(-1) # self.comp_query: (hdim,)
         comp_weights = comp_weights / math.sqrt(self.hidden_dim) # comp_weights: (bsz, cur_len)
+        indices = None
         if indices_given is not None:
             select_mask = basic.\
                 convert_to_one_hot(indices_given, comp_weights.shape[1]).float()
@@ -122,7 +123,10 @@ class BinaryTreeLSTM(nn.Module):
                     logits=comp_weights, temperature=self.gumbel_temperature,
                     mask=mask) # mask: (bsz, cur_len), select_mask: (bsz, cur_len)
             else:
-                select_mask = basic.greedy_select(logits=comp_weights, mask=mask)
+                probs = basic.masked_softmax(logits=comp_weights, mask=mask)
+                indices = probs.max(1)[1]
+                select_mask = basic.convert_to_one_hot(indices=indices,
+                                             num_classes=comp_weights.size(1))
                 select_mask = select_mask.float()
         select_mask_expand = select_mask.unsqueeze(2).expand_as(new_h)
         select_mask_cumsum = select_mask.cumsum(1)
@@ -137,13 +141,14 @@ class BinaryTreeLSTM(nn.Module):
                  + left_mask_expand * old_c_left
                  + right_mask_expand * old_c_right)
         selected_h = (select_mask_expand * new_h).sum(1)
-        return new_h, new_c, select_mask, selected_h
+        return new_h, new_c, select_mask, selected_h, indices
 
-    def forward(self, input, length, return_select_masks=False, tree=None):
+    def forward(self, input, length, tree=None):
         max_depth = input.size(1)
         length_mask = basic.sequence_mask(sequence_length=length,
                                           max_length=max_depth) # length_mask: (bsz, seq_len)
         select_masks = []
+        indices_lst = []
 
         if self.use_leaf_rnn:
             hs = []
@@ -198,10 +203,12 @@ class BinaryTreeLSTM(nn.Module):
             if i < max_depth - 2:
                 # We don't need to greedily select the composition in the
                 # last iteration, since it has only one option left.
-                new_h, new_c, select_mask, selected_h = self.select_composition(
-                    old_state=state, new_state=new_state,
-                    mask=length_mask[:, i+1:],
-                    indices_given=tree[i] if tree is not None else None) # select_mask: (bsz, cur_len), i.e. select_dist over constituents at each time step
+                new_h, new_c, select_mask, selected_h, indices = \
+                    self.select_composition(
+                        old_state=state, new_state=new_state,
+                        mask=length_mask[:, i+1:],
+                        indices_given=tree[i] if tree is not None else None) # select_mask: (bsz, cur_len), i.e. select_dist over constituents at each time step
+                indices_lst.append(indices)
                 new_state = (new_h, new_c)
                 select_masks.append(select_mask)
                 if self.intra_attention:
@@ -230,7 +237,5 @@ class BinaryTreeLSTM(nn.Module):
             # h: (batch_size, 1, 2 * hidden_dim)
             h = (att_weights_expand * nodes).sum(1)
         assert h.size(1) == 1 and c.size(1) == 1
-        if not return_select_masks:
-            return h.squeeze(1), c.squeeze(1)
-        else:
-            return h.squeeze(1), c.squeeze(1), select_masks
+        return h.squeeze(1), c.squeeze(1), indices_lst
+

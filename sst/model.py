@@ -97,6 +97,6 @@ class SSTModel(nn.Module):
     def forward(self, words, length, tree=None):
         words_embed = self.word_embedding(words)
         words_embed = self.dropout(words_embed)
-        sentence_vector, _ = self.encoder(input=words_embed, length=length, tree=tree)
+        sentence_vector, _, indices_lst = self.encoder(input=words_embed, length=length, tree=tree)
         logits = self.classifier(sentence_vector)
-        return logits
+        return logits, indices_lst

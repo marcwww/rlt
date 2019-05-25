@@ -15,7 +15,7 @@ import numpy as np
 from nets import basic
 import six
 from nltk.tree import Tree
-from sst.model_lstm import SSTModel
+from sst.model import SSTModel
 import crash_on_ipy
 
 logging.basicConfig(level=logging.INFO,
@@ -153,16 +153,18 @@ def build_iters(args):
     return train_iter, valid_iter, test_iter, (TXT, TREE, LBL)
 
 
-def test(model, data_loader, args):
-    def run_iter(batch, is_training, latent_tree=True):
+def test(model, tree_model, data_loader, args):
+    def run_iter(batch, is_training, tree_model, latent_tree=True):
         model.train(is_training)
         words, length = batch.txt
         label = batch.lbl
-        tree = batch.tree
-        logits = model(words=words, length=length,
-                       tree=tree if not latent_tree else None)
+        # tree = batch.tree
+        _, tree = tree_model(words=words, length=length, tree=None)
+        logits, _ = model(words=words, length=length,
+                          tree=tree if not latent_tree else None)
         label_pred = logits.max(1)[1]
         accuracy = torch.eq(label, label_pred).float().mean()
+
         return accuracy
 
     test_accuracy_sum = 0
@@ -170,12 +172,32 @@ def test(model, data_loader, args):
     for valid_batch in data_loader:
         test_accuracy = run_iter(
             batch=valid_batch, is_training=False,
+            tree_model=tree_model,
             latent_tree=args.latent_tree)
         test_accuracy_sum += test_accuracy.item()
 
     test_accuracy = test_accuracy_sum / num_test_batches
     # logging.info(f'test acc {test_accuracy:.4f}')
     return test_accuracy
+
+
+def load(args, num_classes, num_words):
+    model = SSTModel(num_classes=num_classes, num_words=num_words,
+                     word_dim=args.word_dim, hidden_dim=args.hidden_dim,
+                     clf_hidden_dim=args.clf_hidden_dim,
+                     clf_num_layers=args.clf_num_layers,
+                     use_leaf_rnn=args.leaf_rnn,
+                     bidirectional=args.bidirectional,
+                     intra_attention=args.intra_attention,
+                     use_batchnorm=args.batchnorm,
+                     dropout_prob=args.dropout)
+
+    device = torch.device(args.gpu if args.gpu != -1 else 'cpu')
+    model.to(device)
+    model.load_state_dict(torch.load(args.tree_model))
+    model.eval()
+
+    return model
 
 
 def train(args):
@@ -190,8 +212,7 @@ def train(args):
                      bidirectional=args.bidirectional,
                      intra_attention=args.intra_attention,
                      use_batchnorm=args.batchnorm,
-                     dropout_prob=args.dropout,
-                     pooling=args.pooling)
+                     dropout_prob=args.dropout)
     if args.pretrained:
         model.word_embedding.weight.data.set_(TXT.vocab.vectors)
     if args.fix_word_embedding:
@@ -200,6 +221,9 @@ def train(args):
     logging.info(f'Using device {args.gpu}')
     device = torch.device(args.gpu if args.gpu != -1 else 'cpu')
     model.to(device)
+
+    tree_model = load(args, num_classes, len(TXT.vocab))
+
     params = [p for p in model.parameters() if p.requires_grad]
     if args.optimizer == 'adam':
         optimizer_class = optim.Adam
@@ -220,13 +244,14 @@ def train(args):
     valid_summary_writer = SummaryWriter(
         log_dir=os.path.join(args.save_dir, 'log', 'valid'))
 
-    def run_iter(batch, is_training, latent_tree=True):
+    def run_iter(batch, is_training, tree_model, latent_tree=True):
         model.train(is_training)
         words, length = batch.txt
         label = batch.lbl
-        tree = batch.tree
-        logits = model(words=words, length=length,
-                       tree=tree if not latent_tree else None)
+        # tree = batch.tree
+        _, tree = tree_model(words=words, length=length, tree=None)
+        logits, _ = model(words=words, length=length,
+                          tree=tree if not latent_tree else None)
         label_pred = logits.max(1)[1]
         accuracy = torch.eq(label, label_pred).float().mean()
         loss = criterion(input=logits, target=label)
@@ -249,8 +274,10 @@ def train(args):
     iter_count = 0
     for epoch in range(args.max_epoch):
         for batch_iter, train_batch in enumerate(tqdm.tqdm(train_loader)):
+            # for batch_iter, train_batch in enumerate(train_loader):
             train_loss, train_accuracy = run_iter(
                 batch=train_batch, is_training=True,
+                tree_model=tree_model,
                 latent_tree=args.latent_tree)
             iter_count += 1
             add_scalar_summary(
@@ -266,6 +293,7 @@ def train(args):
                 for valid_batch in valid_loader:
                     valid_loss, valid_accuracy = run_iter(
                         batch=valid_batch, is_training=False,
+                        tree_model=tree_model,
                         latent_tree=args.latent_tree)
                     valid_loss_sum += valid_loss.item()
                     valid_accuracy_sum += valid_accuracy.item()
@@ -283,7 +311,7 @@ def train(args):
                              f'valid loss = {valid_loss:.4f}, '
                              f'valid accuracy = {valid_accuracy:.4f}')
                 if valid_accuracy > best_vaild_accuacy:
-                    test_acc = test(model, test_loader, args)
+                    test_acc = test(model, tree_model, test_loader, args)
                     best_vaild_accuacy = valid_accuracy
                     model_filename = (f'nets-{progress:.2f}'
                                       f'-{valid_loss:.4f}'
@@ -326,8 +354,9 @@ def main():
     parser.add_argument('--lower', default=False, action='store_true')
     parser.add_argument('--latent-tree', default=False, action='store_true')
     parser.add_argument('-seed', default=1000, type=int)
-    # parser.add_argument('-pooling', default='final', type=str)
-    parser.add_argument('-pooling', default='lstm', type=str)
+    parser.add_argument('-tree_model',
+                        default='nets-0.05-1.2640-0.5144.pkl',
+                        type=str)
     args = parser.parse_args()
 
     basic.init_seed(args.seed)
